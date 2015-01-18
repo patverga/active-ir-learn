@@ -1,3 +1,6 @@
+import cc.factorie.app.nlp.embeddings.{WordEmbeddingModel, EmbeddingOpts}
+import cc.factorie.app.nlp.phrase.BILOUChainChunker
+import cc.factorie.app.nlp.pos.OntonotesForwardPosTagger
 import cc.factorie.app.nlp.segment.{DeterministicSentenceSegmenter, DeterministicTokenizer}
 import cc.factorie.app.nlp.{DocumentAnnotationPipeline, Document}
 import cc.factorie.app.nlp.lexicon.StopWords
@@ -18,23 +21,41 @@ import scala.util.Random
 
 object Main extends App {
 
-//  val topic = "progressive rock bands 1970s"
-//  val examples = Seq("Rush", "Genesis", "Emerson Lake and Palmer", "King Crimson")//,"Yes")
-  val topic = "states in the United States"
-  val examples = Seq("Massachusetts", "California", "Montana", "New York", "North Dakota")
-//  val topic = "former presidents of the united states"
-//  val examples = Seq("George Washington", "Bill Clinton", "Harry Truman", "George Bush", "Dwight D Eisenhower", "John F Kennedy", "Richard Nixon")
+  val rand = new Random(69)
+//    val topic = "small breeds of dogs"
+//    val examples = Seq("chihuahua", "dachshund", "pug", "terrier", "beagle")
+//    val topic = "states in the United States of America"
+//    val examples = Seq(
+//    "Massachusetts", "Montana", "Florida",
+//    "South Carolina", "New York", "North Dakota"
+//    )
+//  val topic = "types of fruits"
+//  val examples = Seq("apple", "orange" ,"banana", "lime", "kiwi")
+    val topic = "United States politicians"
+    val examples = Seq(
+      "Bill Clinton", "John Kerry", "George Bush", "Ted Kennedy", "John Edwards", "Joe Lieberman",
+      "Kennedy", "Bush", "Clinton", "Jefferson", "Truman"
+    )
 
   val exampleRegex = examples.mkString(".*((", ")|(", ")).*").r
   println(exampleRegex)
   val exampleTerms = examples.map((_, 1.0)) //.mkString("#combine((", ")#combine( ", "))")
 
 
+
   val (searcher, params) = initializeGalago()
-//  val (collectionRankings, passages) = getPassages
+  //  val (collectionRankings, passages) = getPassages
   val passages = examples.flatMap(getPassages)
-  val r = train(passages)
-  topK(r._1, r._2)
+  assert(passages.size>0, "no passages found")
+  val (train, test) = labelData(passages, bigramLabels = true)
+
+  val model = new ConllForwardNer
+  model.train(train, test, iters=3)(rand)
+    topK(model, test)
+
+//  val model = new CustomNerChainCRF()
+//  model.train(train++ test.take(test.size-1), Seq(test.last))(rand)
+
 
 
   def initializeGalago() : (GalagoSearcher, Parameters) = {
@@ -46,11 +67,11 @@ object Main extends App {
   }
 
 
-  def getPassages(queryExample : String): Seq[String] = //(Seq[parse.Document], Seq[String]) =
+  def getPassages(queryExample : String): Seq[(Double, String)] = //(Seq[parse.Document], Seq[String]) =
   {
     val sdmQuery = s"#combine(${GalagoQueryBuilder.seqdep(topic).queryStr} ${GalagoQueryBuilder.seqdep(queryExample).queryStr})"
-//    val sdmQuery = GalagoQueryBuilder.seqdep(exampleTerms.mkString(" ")).queryStr
-//    val exampleQuery = GalagoQueryLib.buildWeightedCombine(Seq((sdmQuery, 0.33), (GalagoQueryLib.buildWeightedCombine(exampleTerms), 1 - 0.33)))
+    //    val sdmQuery = GalagoQueryBuilder.seqdep(exampleTerms.mkString(" ")).queryStr
+    //    val exampleQuery = GalagoQueryLib.buildWeightedCombine(Seq((sdmQuery, 0.33), (GalagoQueryLib.buildWeightedCombine(exampleTerms), 1 - 0.33)))
 
     // initial document retrieval
     val collectionRankings = searcher.retrieveScoredDocuments(sdmQuery, Some(params), 1000).map(d => searcher.pullDocument(d.documentName))
@@ -61,78 +82,98 @@ object Main extends App {
     params.set("working", collectionRankings.map(_.name).toList.asJava) // !! from a first pass!
 
     // extract passages from the documents
-    val passages = searcher.retrieveScoredDocuments(sdmQuery, Some(params), 50).map(passDoc => {
-        val pass = passDoc.asInstanceOf[ScoredPassage]
-        val doc = searcher.pullDocumentWithTokens(passDoc.documentName)
-        // TODO : hack because terms are all lower cased
-        //      doc.terms.subList(pass.begin, pass.end).asScala.mkString(" ")
-        val passageBuilder = new StringBuilder
-        var i = pass.begin
-        while (i < pass.end) {
-          passageBuilder.append(doc.text.substring(doc.termCharBegin.get(i), doc.termCharEnd.get(i)))
-          passageBuilder.append(" ")
-          i += 1
-        }
-        passageBuilder.mkString
-      }).filter(exampleRegex.pattern.matcher(_).matches())
-
-//    println("PASSAGES")
-//    passages.foreach(println(_))
+    val passages = searcher.retrieveScoredDocuments(sdmQuery, Some(params), 1000).map(passDoc => {
+      val pass = passDoc.asInstanceOf[ScoredPassage]
+      val doc = searcher.pullDocumentWithTokens(passDoc.documentName)
+      // TODO : hack because terms are all lower cased
+      //      doc.terms.subList(pass.begin, pass.end).asScala.mkString(" ")
+      val passageBuilder = new StringBuilder
+      var i = pass.begin
+      while (i < pass.end) {
+        passageBuilder.append(doc.text.substring(doc.termCharBegin.get(i), doc.termCharEnd.get(i)))
+        passageBuilder.append(" ")
+        i += 1
+      }
+      (passDoc.score, passageBuilder.mkString)
+    }).filter(x=>exampleRegex.pattern.matcher(x._2).matches())
     passages
-//    (collectionRankings, passages)
+  }
+
+def getPassagesOntonotes(queryExample : String): Seq[(Double, String)] = //(Seq[parse.Document], Seq[String]) =
+  {
+    val sdmQuery = s"#combine(${GalagoQueryBuilder.seqdep(topic).queryStr} ${GalagoQueryBuilder.seqdep(queryExample).queryStr})"
+    //    val sdmQuery = GalagoQueryBuilder.seqdep(exampleTerms.mkString(" ")).queryStr
+    //    val exampleQuery = GalagoQueryLib.buildWeightedCombine(Seq((sdmQuery, 0.33), (GalagoQueryLib.buildWeightedCombine(exampleTerms), 1 - 0.33)))
+
+    // initial document retrieval
+    searcher.retrieveScoredDocuments(sdmQuery, Some(params), 111).map(d => (d.score, searcher.pullDocument(d.documentName).text)).filter(d=>exampleRegex.pattern.matcher(d._2).matches())
+
   }
 
 
-  def train(passages : Seq[String]) : (ConllForwardNer, Seq[Document], Seq[Document]) =
+  def labelData(passages : Seq[(Double, String)], bigramLabels :Boolean = false) : (Seq[Document], Seq[Document]) =
   {
-    println("Training")
-    val segmentPipeline = new DocumentAnnotationPipeline(Seq(DeterministicTokenizer, DeterministicSentenceSegmenter))
-    val facDocs = Random.shuffle(passages.map(new Document(_)))
-    facDocs.foreach(segmentPipeline.process)
-//    val sentences = facDocs.flatMap(doc => doc.sentences)
+    // Convert galago data to factorie docs
+    val segmentPipeline = new DocumentAnnotationPipeline(
+      Seq(DeterministicTokenizer, DeterministicSentenceSegmenter,
+        OntonotesForwardPosTagger, BILOUChainChunker))
+    val facDocs = rand.shuffle(passages.map(p => (p._2, new Document(p._2))))
+    facDocs.foreach(d => segmentPipeline.process(d._2))
+
     // TODO this only handles bigrams - also not robust
-    facDocs.foreach(_.sentences.foreach(s => {
-      s.tokens.sliding(2)
+    // label the tokens in the factorie docs
+    facDocs.foreach(d => d._2.sentences.foreach(s => {
+      s.tokens
+        .sliding(2)
         .foreach(bigram => {
+
         // if bigram is in example, use that
-        if(examples.contains(s"${bigram(0).string} ${bigram(1).string}")) {
-          bigram(0).attr += new LabeledCustomNerTag(bigram(0), "B-BRAN")
-          bigram(1).attr += new LabeledCustomNerTag(bigram(1), "L-BRAN")
+        if(!bigram(0).isSentenceEnd  && examples.contains(s"${bigram(0).string} ${bigram(1).string}")) {
+          bigram(0).attr += new LabeledCustomNerTag(bigram(0), if (bigramLabels)"B-BRAN" else "U-BRAN")
+          bigram(1).attr += new LabeledCustomNerTag(bigram(1), if (bigramLabels)"L-BRAN" else "U-BRAN")
         }
         // if not, is first token?
         else if (examples.contains(bigram(0).string))
           bigram(0).attr += new LabeledCustomNerTag(bigram(0), "U-BRAN")
         else "O"
-          bigram(0).attr += new LabeledCustomNerTag(bigram(0), "O")
+        bigram(0).attr += new LabeledCustomNerTag(bigram(0), "O")
         // dont forget the last token of sentence
-        if (bigram(1).isSentenceEnd)
-          if (examples.contains(bigram(1).string))
-            bigram(1).attr += new LabeledCustomNerTag(bigram(1), "U-BRAN")
-          else
-            bigram(1).attr += new LabeledCustomNerTag(bigram(1), "O")
+        if (bigram(1).isSentenceEnd) {
+          bigram(1).attr += new LabeledCustomNerTag(bigram(1), if (examples.contains(bigram(1).string)) "U-BRAN" else "O")
+        }
       })
     }))
 
-    val nerTrainer = new ConllForwardNer
-    val mid = facDocs.size/2
-    val test = facDocs take mid
-    val train = facDocs.takeRight(mid)
-    nerTrainer.train(train, test, iters=1)(Random)
-    val r = (nerTrainer, train, test)
-    r
+    // split into test, train
+    val mid = (facDocs.size/3)*2
+    val test = (facDocs take mid).map(_._2)
+    val train = facDocs.takeRight(mid).map(_._2)
+    (train, test)
   }
 
   def topK(model: ConllForwardNer, documents: Seq[Document]): Unit =
   {
-    val scores = documents.flatMap(d => d.sentences.map(s => new LightweightNerTokenSpan(s.tokens))
-      .flatMap(s => s.tokens.filterNot(t => StopWords.containsWord(t.string)).sliding(2)
-      .map(bigram => {
-        val s1 = model.predict(bigram(0))
-        if (s1(4) > math.max(s1(1), s1(3))) (bigram(0).string, s1(4))
-        else ( s"${bigram(0).string} ${bigram(1).string}", s1(1))
-      }))).sortBy(-_._2)
+    val uIndex = 3
+    val scores = documents.flatMap(d => d.sentences.map(s =>
+      new LightweightNerTokenSpan(s.tokens))
+      .flatMap(s => s.tokens.filterNot(t => StopWords.containsWord(t.string))
+      .flatMap(token => {
+      val v = model.predictScores(token)
+//      if (v.maxIndex == 0) // classified as no label
+//        Seq()
+//      else
+//      if ((token.chunkTag.categoryValue.startsWith("B")||token.chunkTag.categoryValue.startsWith("I"))
+//        && token.idxInSentence +1 < token.sentence.length){
+//        val next = token.sentence(token.idxInSentence+1)
+//        val v2 = model.predictScores(next)
+//        Seq((token.string, v(uIndex)), (s"${token.string} ${next.string}", Math.max(v(uIndex),v2(uIndex))) )//(v(4)+v2(4))/2.0)) //
+//      }
+//      else // unigram
+       val maxScore = Seq (v(1), v(2), v(3)).zipWithIndex.maxBy(_._1)
+        Seq( (token.string,  maxScore._1, maxScore._2))
+    }))).sortBy(-_._2)
 
-    scores.filterNot(x => examples.contains(x._1)).foreach(println)
+    scores.filterNot(x => examples.contains(x._1)).take(50).foreach(println)
 
   }
 
