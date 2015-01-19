@@ -21,6 +21,8 @@ import scala.util.Random
 
 object Main extends App {
 
+  val docResults = 1000
+  val passageResults =1000
   val rand = new Random(69)
 //    val topic = "small breeds of dogs"
 //    val examples = Seq("chihuahua", "dachshund", "pug", "terrier", "beagle")
@@ -31,10 +33,10 @@ object Main extends App {
 //    )
 //  val topic = "types of fruits"
 //  val examples = Seq("apple", "orange" ,"banana", "lime", "kiwi")
-    val topic = "United States politicians"
+    val topic = "United States of America politicians"
     val examples = Seq(
-      "Bill Clinton", "John Kerry", "George Bush", "Ted Kennedy", "John Edwards", "Joe Lieberman",
-      "Kennedy", "Bush", "Clinton", "Jefferson", "Truman"
+      "Bill Clinton", "John Kerry", "George Bush", "Ted Kennedy", "John Edwards", "Joe Lieberman"
+//      "Kennedy", "Bush", "Clinton", "Jefferson", "Truman"
     )
 
   val exampleRegex = examples.mkString(".*((", ")|(", ")).*").r
@@ -74,7 +76,7 @@ object Main extends App {
     //    val exampleQuery = GalagoQueryLib.buildWeightedCombine(Seq((sdmQuery, 0.33), (GalagoQueryLib.buildWeightedCombine(exampleTerms), 1 - 0.33)))
 
     // initial document retrieval
-    val collectionRankings = searcher.retrieveScoredDocuments(sdmQuery, Some(params), 1000).map(d => searcher.pullDocument(d.documentName))
+    val collectionRankings = searcher.retrieveScoredDocuments(sdmQuery, Some(params), docResults).map(d => searcher.pullDocument(d.documentName))
     params.set("passageQuery", true)
     params.set("passageSize", 50)
     params.set("passageShift", 25)
@@ -82,7 +84,7 @@ object Main extends App {
     params.set("working", collectionRankings.map(_.name).toList.asJava) // !! from a first pass!
 
     // extract passages from the documents
-    val passages = searcher.retrieveScoredDocuments(sdmQuery, Some(params), 1000).map(passDoc => {
+    val passages = searcher.retrieveScoredDocuments(sdmQuery, Some(params), passageResults).map(passDoc => {
       val pass = passDoc.asInstanceOf[ScoredPassage]
       val doc = searcher.pullDocumentWithTokens(passDoc.documentName)
       // TODO : hack because terms are all lower cased
@@ -123,10 +125,7 @@ def getPassagesOntonotes(queryExample : String): Seq[(Double, String)] = //(Seq[
     // TODO this only handles bigrams - also not robust
     // label the tokens in the factorie docs
     facDocs.foreach(d => d._2.sentences.foreach(s => {
-      s.tokens
-        .sliding(2)
-        .foreach(bigram => {
-
+      s.tokens.sliding(2).foreach(bigram => {
         // if bigram is in example, use that
         if(!bigram(0).isSentenceEnd  && examples.contains(s"${bigram(0).string} ${bigram(1).string}")) {
           bigram(0).attr += new LabeledCustomNerTag(bigram(0), if (bigramLabels)"B-BRAN" else "U-BRAN")
@@ -135,10 +134,10 @@ def getPassagesOntonotes(queryExample : String): Seq[(Double, String)] = //(Seq[
         // if not, is first token?
         else if (examples.contains(bigram(0).string))
           bigram(0).attr += new LabeledCustomNerTag(bigram(0), "U-BRAN")
-        else "O"
-        bigram(0).attr += new LabeledCustomNerTag(bigram(0), "O")
+        else
+          bigram(0).attr += new LabeledCustomNerTag(bigram(0), "O")
         // dont forget the last token of sentence
-        if (bigram(1).isSentenceEnd) {
+        if (!bigram(0).isSentenceEnd && bigram(1).isSentenceEnd) {
           bigram(1).attr += new LabeledCustomNerTag(bigram(1), if (examples.contains(bigram(1).string)) "U-BRAN" else "O")
         }
       })
@@ -170,10 +169,15 @@ def getPassagesOntonotes(queryExample : String): Seq[(Double, String)] = //(Seq[
 //      }
 //      else // unigram
        val maxScore = Seq (v(1), v(2), v(3)).zipWithIndex.maxBy(_._1)
-        Seq( (token.string,  maxScore._1, maxScore._2))
+       val tString = if (maxScore._2 == 0 && token.idxInSentence < token.sentence.length -1)
+         token.string + " " + token.sentence(token.idxInSentence +1 ).string else token.string
+
+       Seq( (tString,  maxScore._1, maxScore._2))
     }))).sortBy(-_._2)
 
-    scores.filterNot(x => examples.contains(x._1)).take(50).foreach(println)
+//    scores.filterNot(x => examples.contains(x._1)).take(50).foreach(println)
+    scores.filterNot(x => examples.contains(x._1)).groupBy(_._1).map(_._2.maxBy(_._2)).toSeq.sortBy(-_._2).take(50).foreach(println)
+
 
   }
 
