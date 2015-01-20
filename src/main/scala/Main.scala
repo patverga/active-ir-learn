@@ -1,75 +1,76 @@
-import cc.factorie.app.nlp.embeddings.{WordEmbeddingModel, EmbeddingOpts}
+import cc.factorie.app.nlp.lexicon.StopWords
 import cc.factorie.app.nlp.phrase.BILOUChainChunker
 import cc.factorie.app.nlp.pos.OntonotesForwardPosTagger
 import cc.factorie.app.nlp.segment.{DeterministicSentenceSegmenter, DeterministicTokenizer}
-import cc.factorie.app.nlp.{DocumentAnnotationPipeline, Document}
-import cc.factorie.app.nlp.lexicon.StopWords
-import edu.umass.ciir.strepsimur.galago.{GalagoParamTools, GalagoQueryBuilder, GalagoQueryLib, GalagoSearcher}
+import cc.factorie.app.nlp.{Document, DocumentAnnotationPipeline}
+import cc.factorie.util.DefaultCmdOptions
+import edu.umass.ciir.strepsimur.galago.{GalagoQueryBuilder, GalagoSearcher}
 import edu.umass.cs.iesl.lffi.ner._
-import org.lemurproject.galago.core.parse
-import org.lemurproject.galago.core.retrieval.{ScoredPassage, ScoredDocument}
-
+import org.lemurproject.galago.core.retrieval.ScoredPassage
 import org.lemurproject.galago.utility.Parameters
 
 import scala.collection.JavaConverters._
-import scala.collection.mutable
 import scala.util.Random
+import scala.util.matching.Regex
 
 /**
  * Created by pv on 1/12/15.
  */
 
-object Main extends App {
-
-  val docResults = 1000
-  val passageResults =1000
+object Main  {
   val rand = new Random(69)
-//    val topic = "small breeds of dogs"
-//    val examples = Seq("chihuahua", "dachshund", "pug", "terrier", "beagle")
-//    val topic = "states in the United States of America"
-//    val examples = Seq(
-//    "Massachusetts", "Montana", "Florida",
-//    "South Carolina", "New York", "North Dakota"
-//    )
-//  val topic = "types of fruits"
-//  val examples = Seq("apple", "orange" ,"banana", "lime", "kiwi")
-    val topic = "United States of America politicians"
-    val examples = Seq(
-      "Bill Clinton", "John Kerry", "George Bush", "Ted Kennedy", "John Edwards", "Joe Lieberman"
-//      "Kennedy", "Bush", "Clinton", "Jefferson", "Truman"
-    )
 
-  val exampleRegex = examples.mkString(".*((", ")|(", ")).*").r
-  println(exampleRegex)
-  val exampleTerms = examples.map((_, 1.0)) //.mkString("#combine((", ")#combine( ", "))")
+  def main(args: Array[String]) {
+
+    val opts = new  ActiveLearnOpts
+    opts.parse(args)
+
+    val (topic, examples) = opts.topic.value match {
+      case "dogs" => ("small breeds of dogs",
+        Seq("chihuahua", "dachshund", "pug", "terrier", "beagle"))
+      case "states" => ("states in the United States of America",
+        Seq("Massachusetts", "Montana", "Florida",
+        "South Carolina", "New York", "North Dakota"))
+      case "fruits" => ("types of fruits",
+        Seq("apple", "orange" ,"banana", "lime", "kiwi"))
+      case "politicians" => ("United States of America politicians",
+        Seq("Bill Clinton", "John Kerry", "George Bush", "Ted Kennedy", "John Edwards", "Joe Lieberman"))
+    }
+
+    val exampleRegex = examples.mkString(".*((", ")|(", ")).*").r
+    println(s"$topic : ${examples.mkString(", ")}")
+
+    val (searcher, params) = initializeGalago(opts.corpus.value)
+    //  val (collectionRankings, passages) = getPassages
+    val passages = examples.flatMap(getPassages(_, exampleRegex, topic, opts.docResults.value, opts.passageResults.value, searcher, params))
+    assert(passages.size > 0, "no passages found")
+    val (train, test) = labelData(passages, examples, bigramLabels = true)
+
+    val model = new ConllForwardNer
+    model.train(train, test, iters=3, negSamplesPerPos=opts.negativeSamples.value)(rand)
+    topK(model, test, examples)
+
+    //  val model = new CustomNerChainCRF()
+    //  model.train(train++ test.take(test.size-1), Seq(test.last))(rand)
+  }
 
 
 
-  val (searcher, params) = initializeGalago()
-  //  val (collectionRankings, passages) = getPassages
-  val passages = examples.flatMap(getPassages)
-  assert(passages.size>0, "no passages found")
-  val (train, test) = labelData(passages, bigramLabels = true)
+  def initializeGalago(corpus: String) : (GalagoSearcher, Parameters) = {
+    val (index, params) = corpus match {
+      case "clueweb" => ("/mnt/nfs/indexes/ClueWeb12/galago/clueweb-12-B13.index", Params.clueb)
+      case "robust" => ("/home/pv/index/robust04", Params.robustTitleDoc)
+    }
 
-  val model = new ConllForwardNer
-  model.train(train, test, iters=3)(rand)
-    topK(model, test)
-
-//  val model = new CustomNerChainCRF()
-//  model.train(train++ test.take(test.size-1), Seq(test.last))(rand)
-
-
-
-  def initializeGalago() : (GalagoSearcher, Parameters) = {
-    val bookIndex = "/home/pv/index/robust04"
-    val params = Params.robustTitleDoc
     val indexParam = new Parameters()
-    indexParam.set("index", bookIndex)
+    indexParam.set("index", index)
     (GalagoSearcher(indexParam), params)
   }
 
 
-  def getPassages(queryExample : String): Seq[(Double, String)] = //(Seq[parse.Document], Seq[String]) =
+  def getPassages(queryExample : String, exampleRegex : Regex, topic :String, docResults :Int,
+                  passageResults :Int, searcher:GalagoSearcher, params:Parameters):
+  Seq[(Double, String)] = //(Seq[parse.Document], Seq[String]) =
   {
     val sdmQuery = s"#combine(${GalagoQueryBuilder.seqdep(topic).queryStr} ${GalagoQueryBuilder.seqdep(queryExample).queryStr})"
     //    val sdmQuery = GalagoQueryBuilder.seqdep(exampleTerms.mkString(" ")).queryStr
@@ -101,19 +102,19 @@ object Main extends App {
     passages
   }
 
-def getPassagesOntonotes(queryExample : String): Seq[(Double, String)] = //(Seq[parse.Document], Seq[String]) =
-  {
-    val sdmQuery = s"#combine(${GalagoQueryBuilder.seqdep(topic).queryStr} ${GalagoQueryBuilder.seqdep(queryExample).queryStr})"
-    //    val sdmQuery = GalagoQueryBuilder.seqdep(exampleTerms.mkString(" ")).queryStr
-    //    val exampleQuery = GalagoQueryLib.buildWeightedCombine(Seq((sdmQuery, 0.33), (GalagoQueryLib.buildWeightedCombine(exampleTerms), 1 - 0.33)))
+//def getPassagesOntonotes(queryExample : String): Seq[(Double, String)] = //(Seq[parse.Document], Seq[String]) =
+//  {
+//    val sdmQuery = s"#combine(${GalagoQueryBuilder.seqdep(topic).queryStr} ${GalagoQueryBuilder.seqdep(queryExample).queryStr})"
+//    //    val sdmQuery = GalagoQueryBuilder.seqdep(exampleTerms.mkString(" ")).queryStr
+//    //    val exampleQuery = GalagoQueryLib.buildWeightedCombine(Seq((sdmQuery, 0.33), (GalagoQueryLib.buildWeightedCombine(exampleTerms), 1 - 0.33)))
+//
+//    // initial document retrieval
+//    searcher.retrieveScoredDocuments(sdmQuery, Some(params), 111).map(d => (d.score, searcher.pullDocument(d.documentName).text)).filter(d=>exampleRegex.pattern.matcher(d._2).matches())
+//
+//  }
 
-    // initial document retrieval
-    searcher.retrieveScoredDocuments(sdmQuery, Some(params), 111).map(d => (d.score, searcher.pullDocument(d.documentName).text)).filter(d=>exampleRegex.pattern.matcher(d._2).matches())
 
-  }
-
-
-  def labelData(passages : Seq[(Double, String)], bigramLabels :Boolean = false) : (Seq[Document], Seq[Document]) =
+  def labelData(passages : Seq[(Double, String)], examples:Seq[String], bigramLabels :Boolean = false) : (Seq[Document], Seq[Document]) =
   {
     // Convert galago data to factorie docs
     val segmentPipeline = new DocumentAnnotationPipeline(
@@ -150,9 +151,8 @@ def getPassagesOntonotes(queryExample : String): Seq[(Double, String)] = //(Seq[
     (train, test)
   }
 
-  def topK(model: ConllForwardNer, documents: Seq[Document]): Unit =
+  def topK(model: ConllForwardNer, documents: Seq[Document], examples :Seq[String]): Unit =
   {
-    val uIndex = 3
     val scores = documents.flatMap(d => d.sentences.map(s =>
       new LightweightNerTokenSpan(s.tokens))
       .flatMap(s => s.tokens.filterNot(t => StopWords.containsWord(t.string))
@@ -181,4 +181,13 @@ def getPassagesOntonotes(queryExample : String): Seq[(Double, String)] = //(Seq[
 
   }
 
+}
+
+
+class ActiveLearnOpts extends DefaultCmdOptions {
+  val corpus = new CmdOption("corpus", "robust", "STRING", "which corpus/index to use")
+  val topic = new CmdOption("topic", "states", "STRING", "Which topic set to use")
+  val docResults = new CmdOption("docResults", 1000, "Int", "Number of doc results for each query")
+  val passageResults = new CmdOption("passageResults", 250, "Int", "Number of top passages to extract from doc results")
+  val negativeSamples = new CmdOption("negative", 3, "Int", "Number of negative samples to use for each positive sample")
 }
