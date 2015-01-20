@@ -28,6 +28,8 @@ object Main  {
     val (topic, examples) = opts.topic.value match {
       case "dogs" => ("small breeds of dogs",
         Seq("chihuahua", "dachshund", "pug", "terrier", "beagle"))
+      case "datasets" => ("data sets in information retrieval",
+        Seq("robust04", "clueweb", "clueweb09"))
       case "states" => ("states in the United States of America",
         Seq("Massachusetts", "Montana", "Florida",
         "South Carolina", "New York", "North Dakota"))
