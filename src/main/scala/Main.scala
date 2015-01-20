@@ -1,15 +1,19 @@
+import cc.factorie.app.nlp.embeddings.EmbeddingOpts
 import cc.factorie.app.nlp.lexicon.StopWords
-import cc.factorie.app.nlp.phrase.BILOUChainChunker
+import cc.factorie.app.nlp.load.BILOUChunkTag
+import cc.factorie.app.nlp.phrase.{PhraseList, NPChunkMentionFinder, BILOUChainChunker}
 import cc.factorie.app.nlp.pos.OntonotesForwardPosTagger
 import cc.factorie.app.nlp.segment.{DeterministicSentenceSegmenter, DeterministicTokenizer}
 import cc.factorie.app.nlp.{Document, DocumentAnnotationPipeline}
 import cc.factorie.util.DefaultCmdOptions
+import co.pemma.embeddings.UpdateableSkipGramEmbeddingModel
 import edu.umass.ciir.strepsimur.galago.{GalagoQueryBuilder, GalagoSearcher}
 import edu.umass.cs.iesl.lffi.ner._
 import org.lemurproject.galago.core.retrieval.ScoredPassage
 import org.lemurproject.galago.utility.Parameters
 
 import scala.collection.JavaConverters._
+import scala.collection.mutable.ArrayBuffer
 import scala.util.Random
 import scala.util.matching.Regex
 
@@ -19,6 +23,7 @@ import scala.util.matching.Regex
 
 object Main  {
   val rand = new Random(69)
+
 
   def main(args: Array[String]) {
 
@@ -43,14 +48,18 @@ object Main  {
     println(s"$topic : ${examples.mkString(", ")}")
 
     val (searcher, params) = initializeGalago(opts.corpus.value)
-    //  val (collectionRankings, passages) = getPassages
+    val collectionRankings = examples.map(queryExample => {searcher.retrieveScoredDocuments(
+      s"#combine(${GalagoQueryBuilder.seqdep(topic).queryStr} ${GalagoQueryBuilder.seqdep(queryExample).queryStr})", Some(params), docResults)
+      .map(d => searcher.pullDocument(d.documentName))}
     val passages = examples.flatMap(getPassages(_, exampleRegex, topic, opts.docResults.value, opts.passageResults.value, searcher, params))
     assert(passages.size > 0, "no passages found")
     val (train, test) = labelData(passages, examples, bigramLabels = true)
 
-    val model = new ConllForwardNer
-    model.train(train, test, iters=3, negSamplesPerPos=opts.negativeSamples.value)(rand)
-    topK(model, test, examples)
+//    val model = new ConllForwardNer
+//    model.train(train, test, iters=3, negSamplesPerPos=opts.negativeSamples.value)(rand)
+//    topK(model, test, examples)
+
+    embeddings(train ++ test, examples)
 
     //  val model = new CustomNerChainCRF()
     //  model.train(train++ test.take(test.size-1), Seq(test.last))(rand)
@@ -61,7 +70,7 @@ object Main  {
   def initializeGalago(corpus: String) : (GalagoSearcher, Parameters) = {
     val (index, params) = corpus match {
       case "clueweb" => ("/mnt/nfs/indexes/ClueWeb12/galago/clueweb-12-B13.index", Params.clueb)
-      case "robust" => ("/home/pv/index/robust04", Params.robustTitleDoc)
+      case "robust" => ("./index/robust04", Params.robustTitleDoc)
     }
 
     val indexParam = new Parameters()
@@ -101,7 +110,9 @@ object Main  {
       }
       (passDoc.score, passageBuilder.mkString)
     }).filter(x=>exampleRegex.pattern.matcher(x._2).matches())
-    passages
+
+//    passages
+    collectionRankings.map(d=> (1.0, d.text))
   }
 
 //def getPassagesOntonotes(queryExample : String): Seq[(Double, String)] = //(Seq[parse.Document], Seq[String]) =
@@ -121,7 +132,7 @@ object Main  {
     // Convert galago data to factorie docs
     val segmentPipeline = new DocumentAnnotationPipeline(
       Seq(DeterministicTokenizer, DeterministicSentenceSegmenter,
-        OntonotesForwardPosTagger, BILOUChainChunker))
+        OntonotesForwardPosTagger, BILOUChainChunker, NPChunkMentionFinder))
     val facDocs = rand.shuffle(passages.map(p => (p._2, new Document(p._2))))
     facDocs.foreach(d => segmentPipeline.process(d._2))
 
@@ -179,14 +190,72 @@ object Main  {
 
 //    scores.filterNot(x => examples.contains(x._1)).take(50).foreach(println)
     scores.filterNot(x => examples.contains(x._1)).groupBy(_._1).map(_._2.maxBy(_._2)).toSeq.sortBy(-_._2).take(50).foreach(println)
+  }
 
+  def embeddings(documents: Seq[Document], examples :Seq[String]): Unit = {
+    val opts = new EmbeddingOpts()
+    opts.parse(Seq(
+      "--ignore-stopwords=true",
+      "--threads=48",
+      "--encoding=UTF8",
+      "--save-vocab=./vocab",
+      "--min-count=1",
+      //    "--load-vocab=./vocab",
+      s"--train=./",
+      s"--output=./"))
 
+    val wordEmbedModel = new UpdateableSkipGramEmbeddingModel(opts)
+//    val phrases : Seq[String] = documents.flatMap(makePhrases)
+    val phrases = documents.flatMap(_.sentences.map(_.string)).toSeq
+    wordEmbedModel.initializeFromStrings(phrases)
+    wordEmbedModel.updateModel(phrases)
+
+    examples.foreach(e => {
+      println(e)
+     wordEmbedModel.distance(e, 10, phrases)
+    })
+  }
+
+  def makePhrases(facDoc : Document) : Seq[String] ={
+//    val phrases = new ArrayBuffer[String]
+//    facDoc.asSection.sentences.foreach(s => {
+//      val tokens = s.tokens
+//      var i = 0
+//      while (i < tokens.size -1){
+//        var current = tokens(i)
+//        var phrase = current.string
+//        if (current.attr[BILOUChunkTag].value.toString().startsWith("B")) {
+//          while (current.next.attr[BILOUChunkTag].value.toString().startsWith("I")
+//            || current.next.attr[BILOUChunkTag].value.toString().startsWith("L")) {
+//            phrase += "_"+current.next.string
+//            current = current.next
+//            i += 1
+//          }
+//        }
+//        else i += 1
+//        phrases += phrase
+//      }
+//    })
+//    phrases.toSeq
+    val usedTokens = scala.collection.mutable.Set[Int]()
+    val docString = for (phrase <- facDoc.attr[PhraseList])
+    yield {
+      phrase.tokens.foreach(usedTokens += _.position)
+      phrase.string.replaceAll("\\s+", "_")
+    }
+
+    // collect phrases and tokens not in phrases
+    docString ++ (for (token <- facDoc.tokens; str = token.string
+                       if !usedTokens.contains(token.position) &&
+                         !StopWords.containsWord(str.toLowerCase) &&
+                         str.size > 1) yield token.string)
   }
 
 }
 
 
-class ActiveLearnOpts extends DefaultCmdOptions {
+class ActiveLearnOpts extends DefaultCmdOptions
+{
   val corpus = new CmdOption("corpus", "robust", "STRING", "which corpus/index to use")
   val topic = new CmdOption("topic", "states", "STRING", "Which topic set to use")
   val docResults = new CmdOption("docResults", 1000, "Int", "Number of doc results for each query")
