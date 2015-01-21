@@ -1,4 +1,5 @@
 import java.io.PrintWriter
+import java.util
 
 import co.pemma.DocReader
 import edu.umass.ciir.strepsimur.galago.GalagoQueryBuilder
@@ -27,15 +28,22 @@ object ExportDocs extends App{
 
   val (searcher, params) = Main.initializeGalago(opts.corpus.value)
 
-  // get initial collection documents
-  val collectionRankings = examples.flatMap(queryExample => {searcher.retrieveScoredDocuments(
-    s"#combine(${GalagoQueryBuilder.seqdep(topic).queryStr} ${GalagoQueryBuilder.seqdep(queryExample).queryStr})", Some(params), opts.docResults.value)
-    .map(d => searcher.pullDocument(d.documentName))}).toSet.toSeq
-
   val writer = new PrintWriter(opts.out.value)
   try {
-    val clean = collectionRankings.map(d => if (opts.corpus.value=="robust") DocReader.parseRobust(d.text) else d.text)
-    clean.mkString("\n").split("\n").filterNot(_.isEmpty).foreach(writer.println)
+    // get initial collection documents
+    val docSet = new util.HashSet[String]
+    examples.foreach(queryExample => {
+      searcher.retrieveScoredDocuments(
+      s"#combine(${GalagoQueryBuilder.seqdep(topic).queryStr} ${GalagoQueryBuilder.seqdep(queryExample).queryStr})", Some(params), opts.docResults.value)
+      .foreach(d => {
+        if (!docSet.contains(d.documentName)) {
+          docSet.add(d.documentName)
+          val doc = searcher.pullDocument(d.documentName)
+          val clean = if (opts.corpus.value=="robust") DocReader.parseRobust(doc.text) else doc.text
+          clean.split("\n").filterNot(_.isEmpty).foreach(writer.println)
+        }
+      })
+    })
   } catch {case e :Exception=> e.printStackTrace()}
 
 }
